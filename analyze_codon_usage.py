@@ -1,6 +1,6 @@
 ### Boas Pucker ###
 ### bpucker@cebitec.uni-bielefeld.de ###
-### v0.1 ###
+### v0.25 ###
 
 __usage__ = """
 	python analyze_codon_usage.py\n
@@ -9,6 +9,8 @@ __usage__ = """
 	
 	optional:
 	--exp <FULL_PATH_TO_EXPRESSION_FILE>
+	--name <NAME>
+	--top100 <ANALYZE_ONLY_TOP100>
 	
 	bug reports and feature requests: bpucker@cebitec.uni-bielefeld.de
 					"""
@@ -214,6 +216,7 @@ def save_codon_usage( codon_usage, codon_usage_exp, genetic_code, output_file ):
 			out.write( 'AminoAcid\tCodon\tCounts\tFrequency\tGlobalFrequency\tExpressionBased\tExpressionBasedGlobalFrequency\n' )
 			for entry in sorted( all_data, key=itemgetter( 'aa', 'codon' ) ):
 				out.write( "\t".join( map( str, [ entry['aa'], entry['codon'], entry['counts'], entry['frequency'], entry['global_freq'], entry['exp'], entry['exp_global'] ] ) ) + '\n' )
+	return all_data
 
 
 def load_gene_expression( expression_file ):
@@ -230,16 +233,121 @@ def load_gene_expression( expression_file ):
 	return expression
 
 
+def construct_codon_string( entry ):
+	"""! @brief construct string of one codon """
+	
+	try:
+		cblock = [ 	entry['codon'],
+							entry['aa'],
+							str( round( entry['exp'], 2 ) ) + " " * (4-len( str( round( entry['exp'], 2 ) ) ) ),	#complete string to three characters
+							" " * ( 5 - len( str( round( entry['exp_global']*1000, 1 ) ) ) ) + str( round( entry['exp_global']*1000, 1 ) ),
+							"(" + " "*( 6-len( str( entry['counts'] )  ) ) +  str( entry['counts'] ) + ")"
+						]
+	except KeyError:
+		cblock = [ 	entry['codon'],
+							entry['aa'],
+							str( round( entry['frequency'], 2 ) ) + " " * (4-len( str( round( entry['exp'], 2 ) ) )),	#complete string to three characters
+							str( round( entry['global_freq']*1000, 1 ) ) + " " * ( 5 - len( str( round( entry['global_freq']*1000, 1 ) ) ) ),
+							"(" + " "*( 6-len( str( entry['counts'] )  ) ) + str( entry['counts'] ) + ")"
+						]
+	return " ".join( cblock )
+
+
+def GC_calculations( CDS ):
+	"""! GC content calculations """
+	
+	nt1 = []
+	nt2 = []
+	nt3 = []
+	for key in CDS.keys():
+		seq = CDS[ key ]
+		if len( seq ) % 3 == 0:
+			if not 'N' in seq:
+				blocks = [ seq[ i:i+3 ] for i in range( 0, len( seq ), 3 ) ]
+				for block in blocks:
+					nt1.append( block[0] )
+					nt2.append( block[1] )
+					nt3.append( block[2] )
+	
+	gc1 = 100.0 * ( nt1.count( "G" ) + nt1.count( "C" ) ) / len( nt1 )
+	gc2 = 100.0 * ( nt2.count( "G" ) + nt2.count( "C" ) ) / len( nt2 )
+	gc3 = 100.0 * ( nt3.count( "G" ) + nt3.count( "C" ) ) / len( nt3 )
+	gc = ( gc1+gc2+gc3 ) / 3.0
+	return gc, gc1, gc2, gc3
+
+
+def construct_10D_table( table_file, codon_usage, number_of_CDS, name, gc, gc1, gc2, gc3 ):
+	"""! @brief construct 10D output format """
+	
+	total_codons = 0
+	codon_dict = {}
+	for entry in codon_usage:
+		total_codons += entry['counts']
+		codon_dict.update( { entry['codon']: entry } )
+	
+	codon_orders = [ ]
+	for nt1 in [ "T", "C", "A", "G" ]:
+		for nt2 in [ "T", "C", "A", "G" ]:
+			for nt3 in [ "T", "C", "A", "G" ]:
+				codon_orders.append( nt1+nt3+nt2 )
+	codon_blocks = [ codon_orders[i:i + 4] for i in xrange(0, len( codon_orders ), 4) ]
+	#blocks of four codons = one line
+	
+	output_lines = []
+	for idx, block in enumerate( codon_blocks ):
+		if idx > 0 and idx % 4 == 0:
+			output_lines.append( "" )	#inserts an empty line after four codon lines
+		new_line = []
+		for codon in block:
+			new_line.append( construct_codon_string( codon_dict[ codon ] ) )
+		output_lines.append( "  ".join( new_line ) )
+	
+	prefix1 = '<html><head>\n<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">\n<title>Codon usage table</title>\n</head>\n<body bgcolor="#F0F0F0">\n'
+	prefix2 = '<strong><i>Cyanidioschyzon merolae strain 10D </i>[gbpln]: ' + str( number_of_CDS) + ' CDS\'s (' + str( total_codons ) + ' codons)</strong>\n\n'
+	prefix3 = '<hr size="1" align="LEFT">\nfields: [triplet] [amino acid] [fraction] [frequency: <strong>per thousand</strong>] ([number])\n<hr size="1" align="LEFT">\n<pre>'
+	suffix1 = '</pre>\n<hr size="1" align="LEFT">\nCoding GC ' + str( gc )+ '%\n1st letter GC ' + str( gc1 )+ '%\n2nd letter GC ' + str( gc2 )+ '%\n3rd letter GC ' + str( gc3 )+ '%<br>\n\n<strong>'
+	suffix2 = 'Genetic code 1: Standard</strong>\n<hr size="1" align="LEFT">\n\n<strong>Format:</strong><br>\n</body>\n</html>'
+	
+	with open( table_file, "w" ) as out:
+		out.write( prefix1 + prefix2 + prefix3 + "\n".join( output_lines ) + "\n" + suffix1 + suffix2 )
+
+
+def reduce_to_top100( CDS, expression ):
+	"""! @brief select the top100 transcripts """
+	
+	exp_per_transcript = []
+	for key in expression.keys():
+		exp_per_transcript.append( { 'ID': key, 'val': expression[ key ] } )
+	
+	top100 = sorted( exp_per_transcript, key=itemgetter('val') )[::-1][:100]
+	
+	top_cds = {}
+	for each in top100:
+		try:
+			top_cds.update( { each['ID']: CDS[ each['ID'] ] } )
+		except KeyError:
+			pass
+	return top_cds
+
+
 def main( arguments ):
 	"""! @brief runs all parts of this script """
 	
 	input_cds_file = arguments[ arguments.index( '--in' )+1 ]
 	output_file = arguments[ arguments.index( '--out' )+1 ]
 	
+	top100 = False
 	expression_status = False
 	if '--exp' in arguments:
 		expression_file = arguments[ arguments.index( '--exp' )+1 ]
 		expression_status = True
+		if '--top100' in arguments:
+			top100 = True
+	
+	if '--name' in arguments:
+		name = arguments[ arguments.index( '--exp' )+1 ]
+	else:
+		name = "xxx"
 	
 	# --- get genetic code --- #
 	genetic_code = load_genetic_code( )	#add genetic code as dictionary to avoid additional file import
@@ -250,6 +358,8 @@ def main( arguments ):
 	# --- get expression --- #
 	if expression_status:
 		expression = load_gene_expression( expression_file )
+		if top100:
+			CDS = reduce_to_top100( CDS, expression )
 		error_counter = 0
 		for ID in CDS.keys():
 			try:
@@ -259,11 +369,16 @@ def main( arguments ):
 				expression.update( { ID: 0 } )
 		print "number of genes missing in expression data set: " + str( error_counter )
 		codon_usage, codon_usage_exp = analyze_codon_usage( CDS, genetic_code.keys(), expression )
-		save_codon_usage( codon_usage, codon_usage_exp, genetic_code, output_file )
+		codon_usage_info = save_codon_usage( codon_usage, codon_usage_exp, genetic_code, output_file )
 		
 	else:
 		codon_usage, codon_usage_exp = analyze_codon_usage( CDS, genetic_code.keys(), {} )
-		save_codon_usage( codon_usage, {}, genetic_code, output_file )
+		codon_usage_info = save_codon_usage( codon_usage, {}, genetic_code, output_file )
+	
+	# --- generate 10D output format file --- #
+	output_10D_table_file = output_file + ".10D.html"
+	gc, gc1, gc2, gc3 = GC_calculations( CDS )
+	construct_10D_table( output_10D_table_file, codon_usage_info, len( CDS.keys() ), name, gc, gc1, gc2, gc3 )
 
 
 if '--in' in sys.argv and '--out' in sys.argv:
